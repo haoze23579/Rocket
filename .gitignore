@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+.venv_exp/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 模型权重（需要时通过 python prediction/train.py 重新训练）
+models/*.pth
+models/*.npz
+
+# 报告图片（通过 python run_experiments.py 重新生成）
+reports/*.png
+
+# 视频
+*.mp4
+
+# LaTeX编译产物
+*.aux
+*.log
+*.out
+*.pdf
+*.synctex.gz
+
+# 打包
+*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local backup repositories
+.git_backup_*/
