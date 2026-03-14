@@ -1,0 +1,59 @@
+# 太空垃圾高速捕获仿真系统配置
+
+simulation:
+  dt: 0.01                    # 仿真步长 (秒)
+  gravity: [0.0, 0.0, 0.0]   # 微重力环境
+  workspace_size: 20.0        # 工作空间范围 (米)
+
+robot_arm:
+  dof: 6                      # 自由度
+  link_lengths: [1.0, 1.5, 1.2, 0.8, 0.5, 0.3]  # 连杆长度
+  joint_max_velocity: 3.14    # 最大关节角速度 (rad/s)
+  joint_max_torque: 100.0     # 最大关节力矩 (Nm)
+  base_position: [0.0, 0.0, 0.0]
+
+debris:
+  linear_velocity_range: [0.1, 6.0]    # 线速度范围 (m/s)
+  angular_velocity_range: [0.0, 1.05]  # 角速度范围 (rad/s, 0-60°/s)
+  shapes: ["satellite", "rocket_stage", "fragment"]
+  initial_distance: 10.0               # 初始距离 (米)
+
+vision:
+  frame_rate: 30              # 帧率 (Hz)
+  fov: 90                     # 视场角
+  noise_std: 0.01             # 测量噪声标准差
+  max_range: 15.0             # 最大探测距离
+
+prediction:
+  model_type: "lstm"          # lstm / transformer
+  sequence_length: 30         # 输入序列长度
+  prediction_horizon: 50      # 预测步数 (0.5s at 100Hz)
+  hidden_size: 128
+  num_layers: 2
+  epochs: 100
+  batch_size: 64
+  learning_rate: 0.001
+
+mpc:
+  prediction_horizon: 20      # MPC预测时域
+  control_horizon: 10         # MPC控制时域
+  weight_position: 10.0       # 位置跟踪权重
+  weight_velocity: 5.0        # 速度匹配权重
+  weight_torque: 0.1          # 力矩平滑权重
+  weight_singularity: 1.0     # 奇异位形惩罚权重
+
+grasp:
+  types: ["three_finger", "flexible_envelope", "electromagnetic"]
+  success_threshold: 0.15     # 抓取成功距离阈值 (米)
+  velocity_threshold: 0.3     # 抓取成功速度阈值 (m/s)
+
+experiment:
+  num_trials: 100             # 每组实验次数
+  velocity_steps: 5           # 速度采样点数
+  angular_velocity_steps: 4   # 角速度采样点数
+
+display:
+  width: 1200
+  height: 800
+  fps: 60
+  star_count: 200
