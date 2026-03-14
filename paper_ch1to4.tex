@@ -1,0 +1,562 @@
+\documentclass[12pt,a4paper]{ctexart}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{multirow}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+\title{\textbf{太空垃圾高速捕获机械臂仿真系统\\——基于视觉预测的轨迹规划研究}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+随着人类航天活动的日益频繁，空间碎片数量急剧增长，对在轨航天器安全构成严重威胁。本研究开发了一套太空垃圾高速捕获机械臂仿真系统，模拟在轨服务航天器对高速运动空间碎片的追踪与抓取过程。系统采用LSTM深度学习网络进行目标运动预测，结合模型预测控制（MPC）实现"预判式"抓取轨迹规划，通过阻尼最小二乘（DLS）雅可比伪逆法求解6自由度机械臂逆运动学。实验在不同目标运动参数（线速度0.1--2.0\,m/s、角速度0--30$^\circ$/s）下进行批量仿真，对比有无运动预测的抓取成功率差异。结果表明，基于视觉预测的轨迹规划策略显著提升了高速碎片的捕获成功率，验证了预测性抓取策略在太空碎片清除任务中的有效性。
+
+\noindent\textbf{关键词：}太空垃圾清除；机械臂抓取；运动预测；LSTM；模型预测控制；轨迹规划；仿真系统
+\end{abstract}
+
+%% ============================================================
+\section{引言}
+
+\subsection{研究背景}
+
+截至目前，地球轨道上已有超过36\,000个大于10\,cm的空间碎片被跟踪编目，而小于1\,cm的碎片数量估计超过1.3亿个。这些高速运动的空间碎片对在轨航天器构成严重威胁——即使是毫米级碎片，在轨道速度（约7.8\,km/s）下也具有巨大的动能。空间碎片主动清除（Active Debris Removal, ADR）已成为国际航天界的重要研究方向\cite{bonnal2013}。
+
+欧洲航天局（ESA）的ClearSpace-1任务计划于2026年发射，旨在验证空间碎片捕获技术。日本宇宙航空研究开发机构（JAXA）的ELSA-d实验已于2021年成功演示了磁性对接捕获技术。这些任务表明，机械臂抓取是空间碎片清除的核心技术路径之一\cite{shan2016}。
+
+\subsection{技术挑战}
+
+太空垃圾捕获面临以下关键技术挑战：
+\begin{enumerate}[label=(\arabic*)]
+  \item \textbf{高速相对运动}：即使在交会接近后，目标碎片仍存在显著的相对运动（可达数m/s），对机械臂的响应速度提出极高要求；
+  \item \textbf{目标非合作性}：碎片通常处于无控翻滚状态，三轴旋转叠加使得姿态变化复杂且难以预测；
+  \item \textbf{形状不规则性}：废弃卫星、火箭残骸、碎片云等目标形状各异，抓取点选择困难；
+  \item \textbf{微重力环境}：微重力条件下的动力学特性与地面环境显著不同；
+  \item \textbf{通信延迟}：地面遥操作存在显著时延，要求系统具备自主决策能力。
+\end{enumerate}
+
+\subsection{研究创新点}
+
+本研究的核心创新在于：采用深度学习（LSTM网络）进行目标运动预测，结合模型预测控制（MPC）实现"预判式"抓取轨迹规划。与传统的反应式控制策略不同，本方法通过预测目标未来0.5--2秒的运动轨迹，提前规划机械臂的拦截路径，从而有效应对高速运动目标的捕获挑战。
+
+\subsection{论文结构}
+
+本文第2节介绍系统总体架构设计；第3节详细阐述各核心算法；第4节描述仿真实验设计与实施；第5节分析实验结果；第6节总结全文并展望未来工作。
+
+
+%% ============================================================
+\section{系统总体架构}
+
+\subsection{系统组成}
+
+本仿真系统由六个核心模块组成：太空环境仿真模块、视觉感知模块、运动预测模块、轨迹规划模块、抓取执行模块和性能评估模块。系统总体架构如图\ref{fig:arch}所示。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{model_arch.png}
+\caption{系统总体架构图}
+\label{fig:arch}
+\end{figure}
+
+各模块间的数据流关系如下：
+
+太空环境仿真模块负责碎片运动动力学、微重力环境和多形状碎片模型的模拟。视觉感知模块模拟传感器并添加测量噪声，输出观测序列。运动预测模块（LSTM/物理基线）接收观测序列，输出预测轨迹和置信度。轨迹规划模块（MPC优化）根据预测轨迹规划机械臂末端的最优运动路径。抓取执行模块包含6-DOF机械臂、DLS逆运动学求解器和末端执行器策略选择。性能评估模块统计成功率、响应时间、相对速度和预测误差等指标。
+
+\subsection{变量设计}
+
+\textbf{自变量（实验控制参数）：}
+\begin{itemize}
+  \item 目标线速度：$0.1 \sim 2.0$\,m/s
+  \item 目标旋转角速度：$0 \sim 30^\circ$/s（$0 \sim 0.524$\,rad/s）
+  \item 目标形状：废弃卫星、火箭残骸、不规则碎片
+\end{itemize}
+
+\textbf{因变量（性能指标）：}
+\begin{itemize}
+  \item 抓取成功率
+  \item 抓取响应时间（从检测到抓取成功的时间）
+  \item 末端执行器与目标的相对速度差
+  \item 最小接近距离
+\end{itemize}
+
+\textbf{控制变量：}
+\begin{itemize}
+  \item 机械臂自由度：6-DOF
+  \item 关节最大角速度：$3.14$\,rad/s
+  \item 视觉系统帧率：30\,Hz
+  \item 传感器噪声标准差：$0.01$\,m
+\end{itemize}
+
+
+%% ============================================================
+\section{核心算法}
+
+\subsection{太空碎片运动模型}
+
+\subsubsection{平移运动}
+
+在微重力环境下，碎片不受外力作用，做匀速直线运动：
+\begin{equation}
+  \mathbf{p}(t+\Delta t) = \mathbf{p}(t) + \mathbf{v} \cdot \Delta t
+\end{equation}
+其中$\mathbf{p} \in \mathbb{R}^3$为位置向量，$\mathbf{v} \in \mathbb{R}^3$为速度向量。
+
+\subsubsection{旋转运动}
+
+碎片的旋转运动由欧拉方程描述。对于刚体在无外力矩条件下：
+\begin{equation}
+  \mathbf{I} \dot{\boldsymbol{\omega}} + \boldsymbol{\omega} \times (\mathbf{I} \boldsymbol{\omega}) = \mathbf{0}
+\end{equation}
+其中$\mathbf{I}$为惯性张量矩阵，$\boldsymbol{\omega}$为角速度向量。
+
+惯性张量按长方体近似计算：
+\begin{equation}
+  \mathbf{I} = \mathrm{diag}\!\left(\frac{m(s_y^2+s_z^2)}{12},\; \frac{m(s_x^2+s_z^2)}{12},\; \frac{m(s_x^2+s_y^2)}{12}\right)
+\end{equation}
+
+角速度更新：
+\begin{equation}
+  \boldsymbol{\alpha} = \mathbf{I}^{-1}\bigl(-\boldsymbol{\omega} \times \mathbf{I}\boldsymbol{\omega}\bigr), \quad
+  \boldsymbol{\omega}(t+\Delta t) = \boldsymbol{\omega}(t) + \boldsymbol{\alpha} \cdot \Delta t
+\end{equation}
+
+对于非对称惯性张量（$I_x \neq I_y \neq I_z$），即使无外力矩，角速度方向也会随时间变化，这正是太空碎片复杂翻滚运动的物理根源。
+
+\subsubsection{姿态表示与更新}
+
+采用四元数$\mathbf{q} = (q_w, q_x, q_y, q_z)$表示姿态，避免万向锁问题。四元数积分更新：
+\begin{equation}
+  \Delta\mathbf{q} = \left(\cos\frac{\theta}{2},\; \hat{\boldsymbol{\omega}}\sin\frac{\theta}{2}\right)
+\end{equation}
+其中$\theta = |\boldsymbol{\omega}|\Delta t$，$\hat{\boldsymbol{\omega}} = \boldsymbol{\omega}/|\boldsymbol{\omega}|$。
+
+\begin{equation}
+  \mathbf{q}(t+\Delta t) = \mathbf{q}(t) \otimes \Delta\mathbf{q}
+\end{equation}
+
+四元数乘法定义为：
+\begin{equation}
+  \mathbf{q}_1 \otimes \mathbf{q}_2 = \begin{pmatrix} w_1w_2 - x_1x_2 - y_1y_2 - z_1z_2 \\ w_1x_2 + x_1w_2 + y_1z_2 - z_1y_2 \\ w_1y_2 - x_1z_2 + y_1w_2 + z_1x_2 \\ w_1z_2 + x_1y_2 - y_1x_2 + z_1w_2 \end{pmatrix}
+\end{equation}
+
+
+\subsection{6-DOF机械臂运动学}
+
+\subsubsection{DH参数与正运动学}
+
+采用标准Denavit-Hartenberg（DH）参数描述机械臂构型\cite{siciliano2016}。每个关节的齐次变换矩阵为：
+\begin{equation}
+  \mathbf{T}_i = \begin{pmatrix} c\theta_i & -s\theta_i c\alpha_i & s\theta_i s\alpha_i & a_i c\theta_i \\ s\theta_i & c\theta_i c\alpha_i & -c\theta_i s\alpha_i & a_i s\theta_i \\ 0 & s\alpha_i & c\alpha_i & d_i \\ 0 & 0 & 0 & 1 \end{pmatrix}
+\end{equation}
+其中$a_i, \alpha_i, d_i, \theta_i$分别为连杆长度、连杆扭转角、连杆偏距和关节角。
+
+末端执行器位姿通过连乘得到：
+\begin{equation}
+  \mathbf{T}_{0}^{6} = \prod_{i=1}^{6} \mathbf{T}_{i-1}^{i}
+\end{equation}
+
+本系统机械臂DH参数如表\ref{tab:dh}所示。
+
+\begin{table}[H]
+\centering
+\caption{机械臂DH参数}
+\label{tab:dh}
+\begin{tabular}{ccccc}
+\toprule
+关节 & $a_i$\,(m) & $\alpha_i$\,(rad) & $d_i$\,(m) & 功能 \\
+\midrule
+1 & 0     & $\pi/2$  & 1.0 & 基座旋转 \\
+2 & 1.5   & 0        & 0   & 肩部俯仰 \\
+3 & 1.2   & 0        & 0   & 肘部弯曲 \\
+4 & 0     & $\pi/2$  & 0   & 腕部旋转 \\
+5 & 0     & $-\pi/2$ & 0.8 & 腕部俯仰 \\
+6 & 0     & 0        & 0.8 & 末端旋转 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+总臂展：5.3\,m。
+
+\subsubsection{雅可比矩阵}
+
+雅可比矩阵$\mathbf{J} \in \mathbb{R}^{3 \times 6}$建立末端速度与关节速度的映射关系：
+\begin{equation}
+  \dot{\mathbf{x}} = \mathbf{J}(\mathbf{q})\,\dot{\mathbf{q}}
+\end{equation}
+
+本系统采用数值微分法计算雅可比矩阵：
+\begin{equation}
+  J_{ij} = \frac{f_i(\mathbf{q} + \epsilon \mathbf{e}_j) - f_i(\mathbf{q})}{\epsilon}
+\end{equation}
+其中$\epsilon = 10^{-6}$，$\mathbf{e}_j$为第$j$个关节方向的单位向量，$f_i$为正运动学函数的第$i$个分量。
+
+\subsubsection{阻尼最小二乘逆运动学（DLS-IK）}
+
+传统雅可比伪逆法在奇异位形附近会产生极大的关节速度\cite{wampler1986}。本系统采用阻尼最小二乘（Damped Least Squares, DLS）方法：
+\begin{equation}
+  \Delta\mathbf{q} = \mathbf{J}^T(\mathbf{J}\mathbf{J}^T + \lambda^2\mathbf{I})^{-1} \Delta\mathbf{x}
+\end{equation}
+其中$\lambda = 0.01$为阻尼系数，$\Delta\mathbf{x} = \mathbf{x}_{target} - \mathbf{x}_{current}$为末端位置误差。
+
+关节速度限制：
+\begin{equation}
+  \Delta\mathbf{q}_{limited} = \begin{cases} \Delta\mathbf{q} & \text{if } \max|\Delta q_i| \leq \dot{q}_{max}\Delta t \\ \Delta\mathbf{q} \cdot \dfrac{\dot{q}_{max}\Delta t}{\max|\Delta q_i|} & \text{otherwise} \end{cases}
+\end{equation}
+
+\subsubsection{可操作度指标}
+
+采用Yoshikawa可操作度指标评估机械臂的运动灵活性\cite{yoshikawa1985}：
+\begin{equation}
+  w = \sqrt{\det(\mathbf{J}\mathbf{J}^T)}
+\end{equation}
+当$w \to 0$时，机械臂接近奇异位形，运动能力退化。该指标用于MPC代价函数中的奇异位形惩罚项。
+
+
+\subsection{视觉感知模块}
+
+\subsubsection{传感器模型}
+
+本系统模拟RGB-D深度传感器，以固定帧率采集目标碎片的状态信息。传感器参数如表\ref{tab:sensor}所示。
+
+\begin{table}[H]
+\centering
+\caption{视觉传感器参数}
+\label{tab:sensor}
+\begin{tabular}{cccc}
+\toprule
+参数 & 符号 & 值 & 说明 \\
+\midrule
+采集帧率   & $f_s$      & 30\,Hz   & 每秒采集次数 \\
+测量噪声基准 & $\sigma_0$ & 0.01\,m  & 近距离噪声标准差 \\
+最大探测距离 & $R_{max}$  & 15.0\,m  & 超出则无法观测 \\
+视场角     & FOV        & $90^\circ$ & 传感器视场范围 \\
+观测缓冲区  & $N_{buf}$  & 300帧    & 约10秒历史数据 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{距离相关噪声模型}
+
+真实传感器的测量精度随距离增大而降低。本系统采用线性距离相关噪声模型：
+\begin{equation}
+  \sigma(d) = \sigma_0 \left(1 + \frac{d}{R_{max}}\right)
+\end{equation}
+其中$d$为目标距离，$\sigma_0$为基准噪声标准差。各状态量的噪声分别为：
+\begin{itemize}
+  \item 位置噪声：$\mathbf{n}_p \sim \mathcal{N}(\mathbf{0},\, \sigma(d)^2 \mathbf{I}_3)$
+  \item 速度噪声：$\mathbf{n}_v \sim \mathcal{N}(\mathbf{0},\, (0.5\sigma(d))^2 \mathbf{I}_3)$
+  \item 姿态噪声：$\mathbf{n}_q \sim \mathcal{N}(\mathbf{0},\, (0.1\sigma(d))^2 \mathbf{I}_4)$
+  \item 角速度噪声：$\mathbf{n}_\omega \sim \mathcal{N}(\mathbf{0},\, (0.3\sigma(d))^2 \mathbf{I}_3)$
+\end{itemize}
+
+观测模型为：
+\begin{equation}
+  \hat{\mathbf{p}} = \mathbf{p}_{true} + \mathbf{n}_p, \quad \hat{\mathbf{v}} = \mathbf{v}_{true} + \mathbf{n}_v
+\end{equation}
+
+姿态四元数在加噪后需重新归一化：
+\begin{equation}
+  \hat{\mathbf{q}} = \frac{\mathbf{q}_{true} + \mathbf{n}_q}{\|\mathbf{q}_{true} + \mathbf{n}_q\|}
+\end{equation}
+
+\subsubsection{观测置信度}
+
+传感器输出观测置信度，反映当前测量的可靠程度：
+\begin{equation}
+  c = \mathrm{clip}\!\left(1 - \frac{d}{R_{max}} + \epsilon,\; 0,\; 1\right), \quad \epsilon \sim \mathcal{N}(0, 0.05)
+\end{equation}
+距离越近置信度越高，该值将传递给后续的运动预测和轨迹规划模块。
+
+\subsubsection{帧率限制与观测缓冲}
+
+传感器以固定帧率$f_s = 30$\,Hz工作，仅在采样时刻输出观测数据。观测缓冲区保存最近$N_{buf} = 300$帧数据（约10秒），为LSTM预测模块提供输入序列。观测序列的提取格式为：
+\begin{equation}
+  \mathbf{X} = [\mathbf{x}_{t-L+1}, \mathbf{x}_{t-L+2}, \ldots, \mathbf{x}_t] \in \mathbb{R}^{L \times 10}
+\end{equation}
+其中$L = 30$为序列长度，每帧$\mathbf{x}_i = [p_x, p_y, p_z, v_x, v_y, v_z, q_w, q_x, q_y, q_z]^T$。
+
+
+\subsection{LSTM运动预测模块}
+
+\subsubsection{问题定义}
+
+运动预测的核心任务是：给定目标碎片过去$L$个时刻的观测序列，预测未来$H$个时刻的状态轨迹\cite{hochreiter1997}。形式化表示为：
+\begin{equation}
+  \hat{\mathbf{Y}} = f_{LSTM}(\mathbf{X}), \quad \mathbf{X} \in \mathbb{R}^{L \times 10}, \quad \hat{\mathbf{Y}} \in \mathbb{R}^{H \times 10}
+\end{equation}
+其中$L = 30$（输入序列长度），$H = 50$（预测时域，对应0.5秒@100Hz）。
+
+\subsubsection{网络架构}
+
+采用两层堆叠LSTM网络。输入维度为$(batch, 30, 10)$，经两层LSTM（隐藏层维度128，层间dropout=0.1）后取最后时刻隐状态，分为两个分支：
+\begin{itemize}
+  \item 轨迹预测分支：FC($128 \to 64$) $\to$ ReLU $\to$ FC($64 \to 500$) $\to$ reshape$(50, 10)$
+  \item 置信度分支：FC($128 \to 32$) $\to$ ReLU $\to$ FC($32 \to 50$) $\to$ Sigmoid
+\end{itemize}
+
+网络参数统计如表\ref{tab:lstm}所示。
+
+\begin{table}[H]
+\centering
+\caption{LSTM网络参数统计}
+\label{tab:lstm}
+\begin{tabular}{lc}
+\toprule
+层 & 参数量 \\
+\midrule
+LSTM Layer 1 & 71\,168 \\
+LSTM Layer 2 & 131\,584 \\
+轨迹预测FC   & 40\,756 \\
+置信度FC     & 5\,778 \\
+\midrule
+\textbf{总计} & \textbf{约249K} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{输入输出格式}
+
+输入经归一化处理：
+\begin{equation}
+  \tilde{\mathbf{x}}_i = \frac{\mathbf{x}_i - \boldsymbol{\mu}}{\boldsymbol{\sigma}}
+\end{equation}
+其中$\boldsymbol{\mu}, \boldsymbol{\sigma} \in \mathbb{R}^{10}$为训练集上计算的均值和标准差向量，$\boldsymbol{\sigma}$下界截断为$10^{-6}$以避免除零。
+
+输出包括：(1) 预测轨迹$\hat{\mathbf{Y}} \in \mathbb{R}^{50 \times 10}$，经反归一化还原为物理量；(2) 置信度序列$\mathbf{c} \in [0,1]^{50}$，通过Sigmoid激活，表示各预测时刻的可信程度。
+
+\subsubsection{训练数据生成}
+
+训练数据通过仿真环境自动生成，覆盖不同运动参数组合：线速度$v \in [0.1, 2.0]$\,m/s，角速度$\omega \in [0, 0.524]$\,rad/s，碎片形状随机选取。每条轨迹仿真30秒，以滑动窗口方式提取训练样本（输入30帧 + 标签50帧）。
+
+\subsubsection{物理基线预测器}
+
+作为对比基线，实现了基于物理模型的线性外推预测器\cite{aghili2012}：
+\begin{equation}
+  \hat{\mathbf{p}}(t+\Delta t) = \mathbf{p}(t) + \bar{\mathbf{v}} \cdot \Delta t
+\end{equation}
+其中$\bar{\mathbf{v}}$为最近10帧的平均速度。基线预测器的置信度随时间指数衰减：
+\begin{equation}
+  c(t) = e^{-2t}
+\end{equation}
+
+
+\subsection{MPC轨迹规划模块}
+
+\subsubsection{规划框架}
+
+模型预测控制（MPC）以预测的目标轨迹为参考，在线优化机械臂末端的运动轨迹\cite{camacho2007}。MPC参数配置如表\ref{tab:mpc}所示。
+
+\begin{table}[H]
+\centering
+\caption{MPC参数配置}
+\label{tab:mpc}
+\begin{tabular}{cccc}
+\toprule
+参数 & 符号 & 值 & 说明 \\
+\midrule
+预测时域     & $N_p$       & 20步  & 前瞻规划步数 \\
+控制时域     & $N_c$       & 10步  & 优化控制步数 \\
+位置跟踪权重 & $w_{pos}$   & 10.0  & 末端位置误差权重 \\
+速度匹配权重 & $w_{vel}$   & 5.0   & 相对速度匹配权重 \\
+力矩平滑权重 & $w_{\tau}$  & 0.1   & 关节角度变化量惩罚 \\
+奇异位形惩罚 & $w_{sing}$  & 1.0   & 接近奇异位形的惩罚 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{拦截点选择}
+
+系统在预测轨迹上搜索最优拦截点，综合评分函数为：
+\begin{equation}
+  S(i) = 3.0 \cdot R(i) + 2.0 \cdot c(i) + 1.0 \cdot T(i)
+\end{equation}
+
+可达性评分：
+\begin{equation}
+  R(i) = \begin{cases} 1 - \dfrac{\|\mathbf{p}_i - \mathbf{p}_{tip}\|}{L_{arm}} & \text{if } \|\mathbf{p}_i - \mathbf{p}_{tip}\| \leq 0.95 L_{arm} \\[6pt] 0 & \text{otherwise} \end{cases}
+\end{equation}
+其中$L_{arm} = 5.3$\,m为机械臂总臂展。置信度评分$c(i)$直接使用预测模块输出的置信度。时间评分：
+\begin{equation}
+  T(i) = \begin{cases} e^{-0.05i} & \text{if } i > 5 \\ 0.5 & \text{otherwise} \end{cases}
+\end{equation}
+
+选择$S(i)$最大且$R(i) > 0.1$的点作为拦截目标。
+
+\subsubsection{平滑轨迹生成}
+
+确定拦截点后，采用三次Hermite插值生成平滑的末端轨迹：
+\begin{equation}
+  \mathbf{p}(t) = h_{00}(t)\mathbf{p}_0 + h_{10}(t)T\dot{\mathbf{p}}_0 + h_{01}(t)\mathbf{p}_1 + h_{11}(t)T\dot{\mathbf{p}}_1
+\end{equation}
+其中Hermite基函数为：
+\begin{align}
+  h_{00}(t) &= 2t^3 - 3t^2 + 1 \\
+  h_{10}(t) &= t^3 - 2t^2 + t \\
+  h_{01}(t) &= -2t^3 + 3t^2 \\
+  h_{11}(t) &= t^3 - t^2
+\end{align}
+边界条件：$\mathbf{p}_0$为当前末端位置，$\dot{\mathbf{p}}_0$为当前末端速度，$\mathbf{p}_1$为拦截点位置，$\dot{\mathbf{p}}_1 = \mathbf{0}$（抓取时刻相对速度最小化）。
+
+\subsubsection{MPC代价函数}
+
+完整MPC优化问题的代价函数为：
+\begin{equation}
+  J = \sum_{k=0}^{N_c-1} \left[ w_{pos} \cdot c_k \cdot \|\mathbf{p}_{tip}^k - \mathbf{p}_{pred}^k\|^2 + w_{\tau} \cdot \|\Delta\mathbf{q}^k\|^2 + w_{sing} \cdot P_{sing}(\mathbf{q}^k) \right]
+\end{equation}
+其中$\mathbf{p}_{tip}^k = FK(\mathbf{q}^k)$为第$k$步的末端位置，$c_k$为预测置信度。
+
+奇异位形惩罚定义为：
+\begin{equation}
+  P_{sing}(\mathbf{q}) = \begin{cases} \dfrac{1}{\sigma_{min}(\mathbf{J}) + 10^{-6}} & \text{if } \sigma_{min}(\mathbf{J}) < 0.01 \\[6pt] 0 & \text{otherwise} \end{cases}
+\end{equation}
+其中$\sigma_{min}(\mathbf{J})$为雅可比矩阵的最小奇异值。
+
+\subsubsection{优化求解}
+
+采用L-BFGS-B算法求解约束优化问题。决策变量为$\{\Delta\mathbf{q}^0, \ldots, \Delta\mathbf{q}^{N_c-1}\}$，共$N_c \times 6 = 60$个变量。约束条件为关节速度限制：
+\begin{equation}
+  |\Delta q_i^k| \leq \dot{q}_{max} \cdot \Delta t = 3.14 \times 0.01 = 0.0314 \;\text{rad}
+\end{equation}
+采用热启动策略加速收敛，最大迭代次数50次，函数容差$10^{-6}$。
+
+
+\subsection{抓取策略模块}
+
+\subsubsection{末端执行器选择}
+
+系统模拟三种末端执行器，根据碎片特性自动选择最优方案，如表\ref{tab:gripper}所示。
+
+\begin{table}[H]
+\centering
+\caption{末端执行器参数}
+\label{tab:gripper}
+\begin{tabular}{lccccc}
+\toprule
+执行器类型 & 最大尺寸 & 闭合时间 & 保持力 & 速度容差 & 适用目标 \\
+\midrule
+三指夹爪     & 1.5\,m & 0.3\,s & 50\,N  & 0.3\,m/s & 小型碎片 \\
+柔性包络爪   & 3.0\,m & 0.5\,s & 30\,N  & 0.5\,m/s & 废弃卫星 \\
+电磁吸附器   & 5.0\,m & 0.1\,s & 100\,N & 0.8\,m/s & 火箭残骸 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+选择逻辑基于碎片形状与执行器的优先级映射：废弃卫星优先选择柔性包络爪，火箭残骸优先选择电磁吸附器，不规则碎片优先选择三指夹爪。
+
+\subsubsection{抓取时机决策}
+
+抓取时机综合考虑距离、相对速度和置信度三个条件：
+\begin{equation}
+  \text{Grasp} = \begin{cases} \text{True} & \text{if } d < d_{th} \wedge v_{rel} < v_{tol} \wedge c > 0.3 \\ \text{False} & \text{otherwise} \end{cases}
+\end{equation}
+其中$d_{th} = 0.15$\,m为距离阈值，$v_{tol}$为所选执行器的速度容差，$v_{rel} = \|\dot{\mathbf{p}}_{tip} - \dot{\mathbf{p}}_{debris}\|$为相对速度。
+
+\subsubsection{接近方向计算}
+
+为避免正面碰撞，设碎片运动方向为$\hat{\mathbf{v}}$，碎片到机械臂方向为$\hat{\mathbf{d}}$，则侧向量$\mathbf{s} = \hat{\mathbf{v}} \times \hat{\mathbf{d}}$。若$\|\mathbf{s}\| > 0.1$，接近方向为：
+\begin{equation}
+  \hat{\mathbf{a}} = \mathrm{normalize}(0.7\hat{\mathbf{v}} + 0.3\hat{\mathbf{s}})
+\end{equation}
+否则从碎片运动方向的正后方追赶：$\hat{\mathbf{a}} = \hat{\mathbf{v}}$。
+
+
+%% ============================================================
+\section{实验设计}
+
+\subsection{实验环境}
+
+仿真实验在以下环境中进行：仿真步长$\Delta t = 0.01$\,s（100\,Hz），工作空间$20 \times 20 \times 20$\,m立方体，微重力环境$\mathbf{g} = \mathbf{0}$，碎片初始距离10.0\,m，单次实验超时30\,s。
+
+\subsection{参数扫描设计}
+
+采用网格搜索方式，在自变量空间中进行系统性参数扫描：
+
+线速度在$[0.1, 2.0]$\,m/s范围内均匀取5个采样点：
+\begin{equation}
+  v \in \{0.1,\; 0.575,\; 1.05,\; 1.525,\; 2.0\} \;\text{m/s}
+\end{equation}
+
+角速度在$[0, 0.524]$\,rad/s范围内均匀取4个采样点：
+\begin{equation}
+  \omega \in \{0,\; 0.175,\; 0.349,\; 0.524\} \;\text{rad/s}
+\end{equation}
+
+碎片形状每组参数随机选取（卫星/火箭残骸/碎片），每个参数组合运行多次实验，总计约50次。
+
+\subsection{对比实验设计}
+
+为验证运动预测模块的有效性，设计两组对比实验：
+
+\textbf{实验组A（有预测）}：传感器$\to$LSTM预测$\to$MPC规划$\to$抓取执行。
+
+\textbf{实验组B（无预测）}：传感器$\to$当前位置$\to$直接追踪$\to$抓取执行。
+
+两组实验使用相同的参数扫描范围和随机种子，确保对比的公平性。
+
+\subsection{评估指标}
+
+评估指标如表\ref{tab:metrics}所示。
+
+\begin{table}[H]
+\centering
+\caption{评估指标定义}
+\label{tab:metrics}
+\begin{tabular}{lll}
+\toprule
+指标 & 定义 & 说明 \\
+\midrule
+抓取成功率 & $\dfrac{N_{success}}{N_{total}} \times 100\%$ & 核心性能指标 \\[8pt]
+平均捕获时间 & $\bar{t} = \dfrac{1}{N_s}\sum_{i=1}^{N_s} t_i$ & 仅统计成功实验 \\[8pt]
+平均相对速度 & $\bar{v}_{rel} = \dfrac{1}{N_s}\sum_{i=1}^{N_s} v_{rel,i}$ & 抓取时刻相对速度 \\[8pt]
+最小接近距离 & $d_{min} = \min_t \|\mathbf{p}_{tip} - \mathbf{p}_{debris}\|$ & 反映追踪精度 \\[8pt]
+预测误差 & $e_{pred} = \|\hat{\mathbf{p}} - \mathbf{p}_{true}\|$ & 预测与真实偏差 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\begin{thebibliography}{10}
+
+\bibitem{bonnal2013}
+Bonnal C, Ruault J M, Desjean M C. Active debris removal: Recent progress and current trends[J]. Acta Astronautica, 2013, 85: 51-60.
+
+\bibitem{shan2016}
+Shan M, Guo J, Gill E. Review and comparison of active space debris capturing and removal methods[J]. Progress in Aerospace Sciences, 2016, 80: 18-32.
+
+\bibitem{flores2014}
+Flores-Abad A, Ma O, Pham K, et al. A review of space robotics technologies for on-orbit servicing[J]. Progress in Aerospace Sciences, 2014, 65: 1-26.
+
+\bibitem{hochreiter1997}
+Hochreiter S, Schmidhuber J. Long short-term memory[J]. Neural Computation, 1997, 9(8): 1735-1780.
+
+\bibitem{camacho2007}
+Camacho E F, Bordons C. Model predictive control[M]. Springer, 2007.
+
+\bibitem{yoshikawa1985}
+Yoshikawa T. Manipulability of robotic mechanisms[J]. The International Journal of Robotics Research, 1985, 4(2): 3-9.
+
+\bibitem{wampler1986}
+Wampler C W. Manipulator inverse kinematic solutions based on vector formulations and damped least-squares methods[J]. IEEE Transactions on Systems, Man, and Cybernetics, 1986, 16(1): 93-101.
+
+\bibitem{siciliano2016}
+Siciliano B, Khatib O. Springer handbook of robotics[M]. Springer, 2016.
+
+\bibitem{botta2017}
+Botta E M, Sharf I, Misra A K. Contact dynamics modeling and simulation of tether nets for space-debris capture[J]. Journal of Guidance, Control, and Dynamics, 2017, 40(1): 110-123.
+
+\bibitem{aghili2012}
+Aghili F. A prediction and motion-planning scheme for visually guided robotic capturing of free-floating tumbling objects with uncertain dynamics[J]. IEEE Transactions on Robotics, 2012, 28(3): 634-649.
+
+\end{thebibliography}
+
+\end{document}
